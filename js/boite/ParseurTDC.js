@@ -16,6 +16,9 @@ const COLOR_DOTS = '#AAAAAA';   // points gris
 const LS_POS     = 'OutiiilTDC:pos';
 const LS_SIZE    = 'OutiiilTDC:size';
 const LS_JOURNAL = 'OutiiilTDC:journal';  // contenu persistant du Journal
+const LS_API_BASE= 'OutiiilTDC:apiBase';
+const LS_API_KEY = 'OutiiilTDC:apiKey';
+const LS_ORPH_MIN = 'OutiiilTDC:orphMin';
 
 /* ==================== UI ==================== */
 const host=document.createElement('div');
@@ -90,6 +93,8 @@ APP
         <div class="tab" data-tab="ups">UPs</div>
         <div class="tab" data-tab="orph">Orphelines</div>
         <div class="tab" data-tab="journal">Journal</div>
+        <div class="tab" data-tab="opts">Options</div>
+        <div class="tab" data-tab="discord">Discord</div>
       </div>
 
       <div class="row" style="padding:0 10px 6px 10px">
@@ -151,7 +156,51 @@ APP
     </div>
   </div>
 
-  <div class="footer">
+
+      <!-- ==== Onglet Discord ==== -->
+      <div id="panel-discord" style="display:none">
+        <div class="row" style="padding:0 10px 6px 10px">
+          <label class="small">Base</label><input id="apiBase" style="width:280px" placeholder="http://127.0.0.1:8000">
+          <label class="small">Clé</label><input id="apiKey"  style="width:340px" placeholder="X-API-Key">
+          <button id="apiSave" class="btn2">Enregistrer</button>
+          <button id="apiTest" class="btn2">Tester</button>
+        </div>
+        <div class="row" style="padding:0 10px 6px 10px">
+          <button id="dcLoadGuilds" class="btn2">Lister guilds</button>
+          <select id="dcGuild" style="min-width:260px"><option value="">— Sélectionne une guild —</option></select>
+          <button id="dcLoadChannels" class="btn2">Lister salons</button>
+          <select id="dcChannel" style="min-width:300px"><option value="">— Sélectionne un salon —</option></select>
+        </div>
+
+        <!-- Calendrier unique (import fenêtré jour par jour) -->
+        <div class="row" style="padding:0 10px 6px 10px">
+          <label class="small">Du</label><input id="dcFromDate" type="date">
+          <label class="small">à</label><input id="dcFromTime" type="time" placeholder="00:00" style="width:120px">
+          <label class="small">au</label><input id="dcToDate" type="date">
+          <label class="small">à</label><input id="dcToTime" type="time" placeholder="23:59" style="width:120px">
+          <button id="dcClearDates" class="btn2">Effacer dates</button>
+        </div>
+
+        <div class="row" style="padding:0 10px 6px 10px">
+          <button id="dcToRaw" class="btn2">Importer → Raw (remplace)</button>
+          <button id="dcToJournal" class="btn2">Importer → Journal (ajoute)</button>
+        </div>
+        <div class="scroll" style="margin:0 10px;border-radius:10px">
+          <table id="tblDcPreview"></table>
+        </div>
+
+      </div>
+      <!-- ==== /Onglet Discord ==== -->
+
+      <div id="panel-opts" style="display:none">
+        <div class="row" style="padding:0 10px 6px 10px; align-items:center; gap:10px">
+          <label class="small" for="orphMin">Seuil Orphelines</label>
+          <input id="orphMin" type="text" placeholder="ex: 1000000 · vide = pas de filtre" style="width:220px">
+          <button id="orphApply" class="btn2">Appliquer</button>
+          <small class="muted">Par défaut : 1 000 000</small>
+        </div>
+      </div>
+<div class="footer">
     <span>Export Toolzzz : en-têtes centrés, points gris, Net vert/rouge.</span>
     <span class="muted">Tout hors-ligne • Format FR supporté.</span>
   </div>
@@ -168,7 +217,7 @@ function updateScrollHeights(){
   const panel = $('#panel');
   if (!panel || !panel.classList.contains('show')) return;
   const rectP = panel.getBoundingClientRect();
-  const panels = ['tx','agg','alli','ups','orph','journal'].map(k=>$('#panel-'+k));
+  const panels = ['tx','agg','alli','ups','orph','journal','discord','opts'].map(k=>$('#panel-'+k));
   const shown = panels.find(p => p && p.style.display !== 'none');
   if(!shown) return;
   const sc = shown.querySelector('.scroll') || shown.querySelector('textarea');
@@ -339,7 +388,8 @@ shadow.querySelectorAll('.tab').forEach(tab=>{
     shadow.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
     tab.classList.add('active');
     const k=tab.dataset.tab;
-    ['tx','agg','alli','ups','orph','journal'].forEach(x=>{$(`#panel-${x}`).style.display=(x===k?'block':'none');});
+    if(k==='opts'){ try{ orphLoadMin(); }catch(_){}}if(k==='discord') dcLoadSaved();
+    ['tx','agg','alli','ups','orph','journal','discord'].forEach(x=>{$(`#panel-${x}`).style.display=(x===k?'block':'none');});
     requestAnimationFrame(updateScrollHeights);
   });
 });
@@ -634,13 +684,30 @@ function parseAll(text){
 const state={tx:[],agg:[],alli:[],ups:[],orph:[],stat:{total:0,recognized:0,ignored:0}};
 const view ={tx:[],agg:[],alli:[],ups:[],orph:[]};
 
+
+function getOrphMin(){
+  try{
+    const raw = localStorage.getItem(LS_ORPH_MIN);
+    if(raw === null) return 1000000;        // défaut: 1 000 000
+    const s = String(raw).replace(/\s+/g,'');
+    if(!s) return NaN;                      // vide => pas de filtre
+    const n = parseInt(s,10);
+    return Number.isFinite(n) ? n : NaN;
+  }catch(_){ return 1000000; }
+}
+function setOrphMin(val){
+  try{ localStorage.setItem(LS_ORPH_MIN, (val==null?'':String(val)).trim()); }catch(_){}
+}
+
+
 function renderAll(res,onlyFilter=false){
   if(!onlyFilter) Object.assign(state,res);
   const fP=filters.player, fA=filters.ally, match=(s,q)=>!q||norm(s).includes(q);
   view.tx   = state.tx  .filter(t => (match(t.winner,fP)||match(t.loser,fP)) && (!fA||match(t.wAlly,fA)||match(t.lAlly,fA)));
   view.agg  = state.agg .filter(a =>  match(a.player,fP) && (!fA||match(a.ally,fA)));
   view.ups  = state.ups .filter(u =>  match(u.player,fP) && (!fA||match(u.ally,fA)));
-  view.orph = state.orph.filter(o =>  match(o.who,fP)    && (!fA||match(o.ally,fA)));
+  const _thr = getOrphMin();
+  view.orph = state.orph.filter(o =>  match(o.who,fP) && (!fA||match(o.ally,fA)) && (!Number.isFinite(_thr) || Math.abs(o.signAmt) >= _thr));
   view.alli = state.alli.filter(a => !fA || match(a.alliance,fA));
 
   fillTx(); fillAgg(); fillAlli(); fillUps(); fillOrph();
@@ -716,8 +783,11 @@ view.orph.forEach(o=>tb.insertAdjacentHTML('beforeend',`<tr>
 <td>${esc(o.who)}</td><td>${esc(o.ally)}</td>
 <td class="r mono">${fmt.format(o.before)}</td>
 <td class="r mono">${fmt.format(o.after)}</td>
-<td class="r mono">${fmt.format(Math.abs(o.signAmt))}</td>
+<td class="r mono">${htmlNet(o.signAmt)}</td>
 </tr>`));
+
+  const totalOrph = view.orph.reduce((acc,o)=>acc+o.signAmt,0);
+  tb.insertAdjacentHTML('beforeend', `<tr class="total"><td colspan="5" class="r"><b>Total</b></td><td class="r mono"><b>${htmlNet(totalOrph)}</b></td></tr>`);
 }
 
 /* ==================== Export ASCII façon Toolzzz ==================== */
@@ -789,7 +859,9 @@ function buildAsciiUps(list){
 function buildAsciiOrph(list){
   const H=['Date/Heure','Joueur','Alliance','Avant','Après','Montant'];
   const A=['left','left','left','right','right','right'];
-  const R=list.map(o=>[dispDate(o.ts), o.who, o.ally, fmt.format(o.before), fmt.format(o.after), fmt.format(Math.abs(o.signAmt))]);
+  const R=list.map(o=>[dispDate(o.ts), o.who, o.ally, fmt.format(o.before), fmt.format(o.after), fmt.format(o.signAmt)]);
+  const total=list.reduce((a,o)=>a+o.signAmt,0);
+  R.push(['','','','','Total', fmt.format(total)]);
   return asciiBox(H,R,A);
 }
 
@@ -840,6 +912,56 @@ function normKind(k){
 }
 
 /* ==================== API Outiiil ==================== */
+
+/* ==================== API Outiiil (helpers) ==================== */
+const API_DEFAULT_BASE = 'http://127.0.0.1:8000';
+function _getApiBase(){ try{ return (localStorage.getItem(LS_API_BASE) || API_DEFAULT_BASE).trim().replace(/\/+$/,''); } catch(_){ return API_DEFAULT_BASE; } }
+function _getApiKey(){  try{ return (localStorage.getItem(LS_API_KEY)  || '').trim(); } catch(_){ return ''; } }
+
+async function _api(path, opts = {}){
+  const base = _getApiBase(); const key = _getApiKey();
+  const url  = base + String(path || '');
+  const urlWithKey = url + (url.includes('?') ? '&' : '?') + (key ? ('key='+encodeURIComponent(key)) : '');
+
+  const headers = { ...(opts.headers||{}) };
+  if (key) {
+    headers['X-API-Key'] = key;                       // compat header
+    headers['Authorization'] = `Bearer ${key}`;       // compat bearer
+  }
+  const controller = new AbortController();
+  const timeoutMs = opts.timeoutMs ?? 25000;
+  const timer = setTimeout(()=>controller.abort(new Error('timeout')), timeoutMs);
+
+  let res;
+  try{
+    res = await fetch(urlWithKey, { ...opts, mode:'cors', headers, signal: controller.signal });
+  }catch(netErr){
+    const err = new Error(netErr?.message || 'Network error'); err.cause = netErr; throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+
+  const hdrs = {};
+  for(const [k,v] of res.headers.entries()) hdrs[k.toLowerCase()] = v;
+
+  if(!res.ok){
+    let payload = null;
+    const ct=(res.headers.get('content-type')||'').toLowerCase();
+    try{ payload = ct.includes('application/json')? await res.json() : await res.text(); }catch(_){ payload=null; }
+    const err = new Error('HTTP '+res.status);
+    err.status = res.status;
+    err.payload = payload;
+    err.headers = hdrs;
+    const ra = parseFloat(hdrs['retry-after']);
+    if(Number.isFinite(ra)) err.retryAfterSec = ra;
+    throw err;
+  }
+
+  const ct=(res.headers.get('content-type')||'').toLowerCase();
+  return ct.includes('application/json') ? res.json() : res.text();
+}
+window.OutiiilAPI = _api;
+
 window.OutiiilTDC = (function(){
   const api = {};
   api.open   = ()=>{ $('#panel').classList.add('show'); requestAnimationFrame(updateScrollHeights); };
@@ -847,8 +969,269 @@ window.OutiiilTDC = (function(){
   api.toggle = ()=>{ toggle(); };
   api.fill   = (txt)=>{ $('#raw').value = txt||''; };
   api.parse  = ()=>{ $('#analyze').click(); };
-  return api;
+
+  api.api    = _api;
+  api.setApi = function({base, key}={}){
+    if(base!=null) try{ localStorage.setItem(LS_API_BASE, String(base||'').trim()); }catch(_){}
+    if(key !=null) try{ localStorage.setItem(LS_API_KEY,  String(key ||'').trim()); }catch(_){}
+    return { base:_getApiBase(), key:_getApiKey() };
+  };
+return api;
 })();
+
+
+function stripMdBackticks(text) {
+  const lines = String(text || '').split(/\r?\n/).map(line => {
+    // enlève seulement les backticks d'ouverture/fermeture, pas de "nom de langue"
+    let s = line.replace(/^\s*```+/, '').replace(/```+\s*$/, '');
+    // supprime les ` inline restants
+    s = s.replace(/`+/g, '');
+    return s;
+  });
+  return lines.join('\n');
+}
+
+/* ==================== Onglet Discord (init + handlers) ==================== */
+
+function dcLoadSaved(){
+  try{ $('#apiBase').value = _getApiBase(); }catch(_){}
+  try{ $('#apiKey').value  = _getApiKey();  }catch(_){}
+}
+dcLoadSaved();
+$('#apiSave').addEventListener('click', ()=>{
+  const base=$('#apiBase').value.trim()||API_DEFAULT_BASE;
+  const key=$('#apiKey').value.trim();
+  OutiiilTDC.setApi({ base, key });
+  setStatus('API enregistrée.');
+});
+
+$('#apiTest').addEventListener('click', async ()=>{
+  try{
+    const h = await OutiiilAPI('/health');
+    let who=null; try{ who = await OutiiilAPI('/whoami'); }catch(_){}
+    setStatus(`API ok · requires_api_key=${h.requires_api_key?'oui':'non'} · ${who?'whoami ok':'whoami ?'}`);
+  }catch(err){ console.error(err); setStatus(`Erreur API: ${err.status||''} ${err.payload?.detail||''}`); }
+});
+
+$('#dcLoadGuilds').addEventListener('click', async ()=>{
+  try{
+    const list = await OutiiilAPI('/guilds');
+    const sel = $('#dcGuild');
+    sel.innerHTML = '<option value="">— Sélectionne une guild —</option>' + (list||[]).map(g=>`<option value="${esc(g.id)}">${esc(g.name||g.id)}</option>`).join('');
+    setStatus(`${(list||[]).length} guild(s).`);
+  }catch(err){ console.error(err); setStatus(`Erreur guilds: ${err.status||''}`); }
+});
+
+$('#dcLoadChannels').addEventListener('click', async ()=>{
+  const gid = $('#dcGuild').value; if(!gid){ setStatus('Choisis une guild.'); return; }
+  try{
+    const list = await OutiiilAPI(`/guilds/${encodeURIComponent(gid)}/channels`);
+    const sel = $('#dcChannel');
+    sel.innerHTML = '<option value="">— Sélectionne un salon —</option>' + (list||[]).map(c=>`<option value="${esc(c.id)}">${esc(c.name||c.id)} (${c.type})</option>`).join('');
+    setStatus(`${(list||[]).length} salon(s).`);
+  }catch(err){ console.error(err); setStatus(`Erreur salons: ${err.status||''}`); }
+});
+
+$('#dcClearDates').addEventListener('click', ()=>{
+  $('#dcFromDate').value = ''; $('#dcToDate').value = ''; $('#dcFromTime').value = ''; $('#dcToTime').value = '';
+});
+$('#copyOrph').addEventListener('click',()=>copyToClipboard(wrapCode(buildAsciiOrph(view.orph))));
+
+async function dcFetchMessages(){
+  const cid = $('#dcChannel').value;
+  if(!cid){ setStatus('Choisis un salon.'); return ''; }
+
+  const fromD = ($('#dcFromDate').value||'').trim();
+  const toD   = ($('#dcToDate').value||'').trim();
+  const fromT = ($('#dcFromTime').value||'').trim();
+  const toT   = ($('#dcToTime').value||'').trim();
+
+  const dtToFr = (dt)=> {
+    const dd=String(dt.getDate()).padStart(2,'0');
+    const mm=String(dt.getMonth()+1).padStart(2,'0');
+    const yy=dt.getFullYear();
+    const HH=String(dt.getHours()).padStart(2,'0');
+    const MM=String(dt.getMinutes()).padStart(2,'0');
+    return `${dd}/${mm}/${yy} ${HH}:${MM}`;
+  };
+  const parseYMD = (ymd)=> new Date(`${ymd}T00:00:00`);
+  const clampToDayStart = (dt)=> new Date(dt.getFullYear(), dt.getMonth(), dt.getDate(), 0,0,0,0);
+  const addDays = (dt,n)=> new Date(dt.getFullYear(), dt.getMonth(), dt.getDate()+n, 0,0,0,0);
+  const sleep = (ms)=> new Promise(r=>setTimeout(r, ms));
+
+  // Aucun filtre => un tir direct
+  if(!fromD && !toD){
+    try{
+      const txt = await OutiiilAPI(`/channels/${encodeURIComponent(cid)}/messages`);
+      const clean = stripMdBackticks(txt);    // preview nettoyée
+      const lines = (clean||'').split(/\r?\n/);
+      const t=$('#tblDcPreview');
+      t.innerHTML = '<thead><tr><th>Aperçu (début)</th></tr></thead><tbody></tbody>';
+      const tb=t.querySelector('tbody');
+      lines.slice(0, 10).forEach(L=>tb.insertAdjacentHTML('beforeend', `<tr><td class="mono">${esc(L)}</td></tr>`));
+      setStatus(`${fmt.format(lines.filter(Boolean).length)} ligne(s) importées.`);
+      return clean||'';
+    }catch(err){ console.error(err); setStatus(`Erreur export: ${err.status||''} ${err.payload?.detail||''}`); return ''; }
+  }
+
+  // Bornes exactes
+  let start = fromD ? parseYMD(fromD) : null;
+  let end   = toD   ? parseYMD(toD)   : null;
+
+  if(start && fromT){
+    const [h,m] = fromT.split(':').map(Number);
+    start.setHours(h||0, m||0, 0, 0);
+  }
+
+  const endWantsFullDay = !toT || /^\s*0{1,2}:0{2}\s*$/.test(toT);
+  if(end){
+    if(endWantsFullDay){
+      end = addDays(end, 1); // inclut toute la journée "au"
+    }else{
+      const [h,m] = toT.split(':').map(Number);
+      end.setHours(h||0, m||0, 0, 0); // borne exclusive
+    }
+  }
+
+  if(!start && end){ start = new Date('1970-01-01T00:00:00'); }
+  else if(start && !end){ end = addDays(clampToDayStart(start), 1); }
+
+  // Fenêtres quotidiennes [after, before[
+  const EPS_MS = 60_000; // chevauchement 1 min
+  const windows = [];
+  let cursor = clampToDayStart(start);
+  const hardEnd = end;
+  const MAX_DAYS = 366;
+  let guard = 0;
+
+  while(cursor < hardEnd && guard++ < MAX_DAYS){
+    const dayStart = cursor;
+    const nextDay  = addDays(dayStart, 1);
+    const afterDt  = (windows.length === 0) ? start : dayStart;
+    const beforeDt = new Date(Math.min(nextDay.getTime() + EPS_MS, hardEnd.getTime() + EPS_MS));
+    if(afterDt >= beforeDt) break;
+    windows.push({ after: afterDt, before: beforeDt });
+    cursor = nextDay;
+  }
+
+  // Backoff 429 (lit header Retry-After + payload)
+  async function fetchWindowWithBackoff(w){
+    const params = new URLSearchParams();
+    params.set('after',  dtToFr(w.after));
+    params.set('before', dtToFr(w.before));
+    let attempts = 0;
+    for(;;){
+      try{
+        return await OutiiilAPI(`/channels/${encodeURIComponent(cid)}/messages?${params.toString()}`);
+      }catch(err){
+        const code = err?.status|0;
+        if(code === 429){
+          const headSec = Number.isFinite(err?.retryAfterSec) ? err.retryAfterSec : NaN;
+          const jsonSec = (err?.payload && typeof err.payload === 'object') ? Number(err.payload.retry_after ?? err.payload.retryAfter ?? NaN) : NaN;
+          const textSec = (typeof err?.payload === 'string') ? (()=>{
+            const m = err.payload.match(/retry[-_ ]?after["']?\s*[:=]\s*("?)(\d+(\.\d+)?)/i);
+            return m ? Number(m[2]) : NaN;
+          })() : NaN;
+          const base = Number.isFinite(headSec) ? headSec : (Number.isFinite(jsonSec) ? jsonSec : (Number.isFinite(textSec) ? textSec : 0.9));
+          const jitter = 0.2 + Math.random()*0.6;
+          const waitMs = Math.min(9000, Math.ceil((base + attempts*0.7 + jitter)*1000));
+          setStatus(`Limite atteinte (429) — pause ${fmt.format(waitMs)} ms...`);
+          await sleep(waitMs);
+          attempts++;
+          continue;
+        }
+        if((code>=500 && code<600) && attempts<4){
+          const waitMs = (attempts+1)*900;
+          setStatus(`Discord 5xx — pause ${fmt.format(waitMs)} ms...`);
+          await sleep(waitMs);
+          attempts++;
+          continue;
+        }
+        throw err;
+      }
+    }
+  }
+
+  // Récupération séquentielle + dédup + tempo entre fenêtres
+  const seen = new Set();
+  const all = [];
+  for(const w of windows){
+    let txt = '';
+    try{
+      txt = await fetchWindowWithBackoff(w);
+    }catch(err){
+      console.error(err);
+      setStatus(`Erreur export (${dtToFr(w.after)} → ${dtToFr(w.before)}): ${err.status||''} ${err.payload?.detail||''}`);
+      continue;
+    }
+    const clean = stripMdBackticks(txt);
+    const lines = (clean||'').split(/\r?\n/);
+    for(const L of lines){
+      if(!L) continue;
+      if(seen.has(L)) continue;
+      seen.add(L);
+      all.push(L);
+    }
+    const BETWEEN_MS = 900 + Math.floor(Math.random()*400); // 900–1300ms
+    await sleep(BETWEEN_MS);
+  }
+
+  // Aperçu + statut
+  const out = all.join('\n');
+  const t=$('#tblDcPreview');
+  t.innerHTML = '<thead><tr><th>Aperçu (début)</th></tr></thead><tbody></tbody>';
+  const tb=t.querySelector('tbody');
+  out.split(/\r?\n/).slice(0,10).forEach(L=>tb.insertAdjacentHTML('beforeend', `<tr><td class="mono">${esc(L)}</td></tr>`));
+
+  const ymdToFr = (ymd)=>{ const [y,m,d]=ymd.split('-').map(Number); return `${String(d).padStart(2,'0')}/${String(m).padStart(2,'0')}/${y}`; };
+  const per = `${fromD? (ymdToFr(fromD)+' '+(fromT||'00:00')) : '…'} → ${toD ? ( (!toT||/^\s*0{1,2}:0{2}\s*$/.test(toT)) ? (ymdToFr(toD)+' 23:59') : (ymdToFr(toD)+' '+toT) ) : '…'}`;
+  setStatus(`${fmt.format(all.filter(Boolean).length)} ligne(s) gardée(s) · ${windows.length} appel(s) API · période: ${per}.`);
+
+  return out;
+}
+
+$('#dcToRaw').addEventListener('click', async ()=>{
+  const txt = await dcFetchMessages();
+  if(txt){ $('#raw').value = stripMdBackticks(txt); }   // nettoyage backticks
+});
+$('#dcToJournal').addEventListener('click', async ()=>{
+  const txt = await dcFetchMessages();
+  if(!txt) return;
+  const clean = stripMdBackticks(txt);                  // nettoyage backticks
+  const sep = $('#journal').value.endsWith('\n') || !$('#journal').value ? '' : '\n';
+  $('#journal').value += sep + clean; saveJournal($('#journal').value); journalUpdateStats();
+});
+
+
+;['#apiBase','#apiKey'].forEach(sel=>{
+  try{
+    shadow.querySelector(sel).addEventListener('blur', ()=>{
+      const base=$('#apiBase').value.trim()||API_DEFAULT_BASE;
+      const key=$('#apiKey').value.trim();
+      OutiiilTDC.setApi({base,key});
+    });
+  }catch(_){}
+});
+
+
+
+/* ---- Options: Orphelines threshold ---- */
+function orphLoadMin(){ const v = getOrphMin(); $('#orphMin').value = Number.isFinite(v) ? String(v) : ''; }
+function orphApplyMin(){
+  const raw = ($('#orphMin').value||'').trim().replace(/\s+/g,'');
+  if(!raw){ setOrphMin(''); } else {
+    const n = parseInt(raw,10);
+    if(Number.isFinite(n)){ setOrphMin(n); } else { setOrphMin(''); }
+  }
+  // Re-render with new filter
+  renderAll({}, true);
+}
+try{
+  $('#orphApply').addEventListener('click', orphApplyMin);
+  $('#orphMin').addEventListener('keydown', (e)=>{ if(e.key==='Enter'){ e.preventDefault(); orphApplyMin(); } });
+  // Auto-save on blur
+  $('#orphMin').addEventListener('blur', ()=>{ orphApplyMin(); });
+}catch(_){}
 
 /* ==================== Données exemple ==================== */
 const SAMPLE=`
