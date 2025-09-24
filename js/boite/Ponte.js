@@ -37,7 +37,7 @@ class BoitePonte extends Boite
 
                 <tr><td colspan='9'>Temps de ponte : <input id='o_niveauTDP' value='${tdp}' size='3'/></td></tr>
 
-              <tr class='o_ponte_total' style='background: rgba(0,0,0,0.04); font-weight:600;'>
+               <tr class='o_ponte_total' style='background: rgba(0,0,0,0.04); font-weight:600;'>
   <td>Total</td>
   <td></td>
   <td></td>
