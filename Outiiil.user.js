@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        Outiiil-test2
 // @author      WhiteRabbit
-// @version     2.9.1
+// @version     3.0
 // @description Outiil de Hraesvelg Modifié par WhiteRabbit
 // @match       http://*.fourmizzz.fr/*
 // @run-at      document-end
