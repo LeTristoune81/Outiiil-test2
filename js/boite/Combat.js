@@ -23,7 +23,55 @@ class BoiteCombat extends Boite
         *
         */
         this._coordonnees = {};
+        // promise / flag pour loader MultiFlood une seule fois
+        this._mfLoading = null;
     }
+
+    /**
+     * Charge (une seule fois) le script MultiFlood.js depuis le CDN / GitHub.
+     * @returns {Promise<void>}
+     */
+    _loadMultiFloodOnce() {
+        if (this._mfLoading) return this._mfLoading;
+
+        // ** ADAPTATION ** : remplace par l'URL que tu veux (jsDelivr recommandé)
+        const MF_URL = "https://cdn.jsdelivr.net/gh/LeTristoune81/Outiiil-test2@main/js/boite/MultiFlood.js";
+
+        this._mfLoading = new Promise((resolve, reject) => {
+            // déjà présent ?
+            if (window.MultiFlood && typeof window.MultiFlood.boot === 'function') {
+                resolve();
+                return;
+            }
+            try {
+                const s = document.createElement('script');
+                s.src = MF_URL + '?v=' + Date.now(); // léger cache-busting
+                s.async = true;
+                s.onload = () => {
+                    // sécurité : attendre que window.MultiFlood soit dispo
+                    if (window.MultiFlood && typeof window.MultiFlood.boot === 'function') {
+                        resolve();
+                    } else {
+                        // small timeout to allow script to initialize
+                        setTimeout(() => {
+                            if (window.MultiFlood && typeof window.MultiFlood.boot === 'function') resolve();
+                            else resolve(); // on résout quand même, boot() gérera l'absence
+                        }, 100);
+                    }
+                };
+                s.onerror = (e) => {
+                    console.error("Erreur chargement MultiFlood.js", e);
+                    reject(new Error("Échec du chargement du module MultiFlood."));
+                };
+                document.head.appendChild(s);
+            } catch (err) {
+                reject(err);
+            }
+        });
+
+        return this._mfLoading;
+    }
+
 	/**
     * Affiche la boite.
     *
@@ -33,8 +81,45 @@ class BoiteCombat extends Boite
 	afficher()
 	{
         if(super.afficher()){
-            $("#o_tabsCombat").tabs({disabled: [2], activate : (e ,ui) => {this.css();}}).removeClass("ui-widget");
+            // Active tous les onglets (Multi-flood compris)
+            $("#o_tabsCombat").tabs({
+                activate: (e, ui) => {
+                    // Appliquer le style
+                    this.css();
+                    // Lazy-load MultiFlood quand l'onglet est activé
+                    try {
+                        if (ui && ui.newPanel && ui.newPanel.attr && ui.newPanel.attr('id') === 'o_tabsCombat3') {
+                            // charge le script externe si nécessaire, puis boot le module
+                            this._loadMultiFloodOnce()
+                                .then(() => {
+                                    if (window.MultiFlood && typeof window.MultiFlood.boot === 'function') {
+                                        try {
+                                            window.MultiFlood.boot('#o_tabsCombat3');
+                                        } catch (err) {
+                                            console.error('MultiFlood.boot erreur:', err);
+                                            $('#o_tabsCombat3').html(`<div style="padding:10px;color:#c00;">Erreur lors du démarrage de Multi-Flood.</div>`);
+                                        }
+                                    } else {
+                                        // script chargé mais module non présent : message informatif
+                                        $('#o_tabsCombat3').html(`<div style="padding:10px;color:#c00;">Module Multi-Flood non disponible après chargement.</div>`);
+                                    }
+                                })
+                                .catch((err) => {
+                                    console.error('Chargement MultiFlood échoué:', err);
+                                    $('#o_tabsCombat3').html(`<div style="padding:10px;color:#c00;">Impossible de charger Multi-Flood : ${String(err)}</div>`);
+                                });
+                        }
+                    } catch (err) {
+                        console.error("Erreur activate tabs Combat:", err);
+                    }
+                }
+            }).removeClass("ui-widget");
+
+            // Charge les autres onglets (Analyser / Simuler / Temps)
             this.analyser().simuler().calculatrice().css().event();
+
+            // Option : charger immédiatement MultiFlood (désactivé par défaut)
+            // this._loadMultiFloodOnce().then(()=>window.MultiFlood && window.MultiFlood.boot('#o_tabsCombat3')).catch(()=>{});
         }
         return this;
 	}
@@ -517,7 +602,7 @@ class BoiteCombat extends Boite
             for(let i = 0, tmp = $("#o_cibleJoueurTemps").val().split(", ") ; i < tmp.length ; i++)
                 if(tmp[i])
                     joueurs.push(new Joueur({pseudo : tmp[i]}));
-            // preparation des alliances
+            // préparation des alliances
             for(let i = 0, tmp = $("#o_cibleTagTemps").val().split(", ") ; i < tmp.length ; i++)
                 if(tmp[i])
                     alliances.push(new Alliance({tag : tmp[i]}));
@@ -630,4 +715,3 @@ class BoiteCombat extends Boite
         return this;
     }
 }
-
