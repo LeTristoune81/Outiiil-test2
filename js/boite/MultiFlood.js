@@ -1,237 +1,443 @@
-// MultiFlood.js — Simulateur Multi-Flood (local, autonome)
-// Dépendances attendues: jQuery ($), moment, (optionnel) $.toast, Joueur, Utils
+// js/boite/MultiFlood.js
+// MultiFlood natif pour Outiiil-test2 — planifie et enchaîne des vagues (sans dépendance externe).
+// Dépendances : Boite, jQuery, jQuery UI (spinner), Utils, TOAST_*
+
 (function(){
-  'use strict';
+'use strict';
 
-  // Evite double définition
-  if (window.MultiFlood) return;
+const LS_KEY_CFG   = 'Outiiil:MultiFlood:cfg:v1';
+const LS_KEY_STATE = 'Outiiil:MultiFlood:state:v1';
 
-  function parseCompo(text){
-    text = (text||'').trim();
-    if (!text) return null;
-    if (text.indexOf('%') !== -1) {
-      const parts = text.split(',').map(s => s.trim());
-      const arr = new Array(14).fill(0);
-      for (let i=0; i<parts.length && i<14; i++){
-        const v = parseFloat(parts[i].replace('%',''));
-        arr[i] = isNaN(v) ? 0 : (v/100);
-      }
-      return {type:'percent', value:arr};
-    } else {
-      const nums = text.split(',').map(s => Number((s||'').trim() || 0));
-      const arr = new Array(14).fill(0);
-      for (let i=0; i<Math.min(14, nums.length); i++) arr[i] = isNaN(nums[i])?0:nums[i];
-      return {type:'absolute', value:arr};
+function now(){ return Date.now(); }
+function pad2(n){ return String(n).padStart(2, '0'); }
+function formatClock(ms){
+  const s = Math.max(0, Math.floor(ms/1000));
+  const h = Math.floor(s/3600);
+  const m = Math.floor((s%3600)/60);
+  const se= s%60;
+  return `${h}:${pad2(m)}:${pad2(se)}`;
+}
+
+// ============ MOTEUR ============
+
+class Scheduler {
+  constructor({onTick, onExec}){
+    this.queue = [];        // [{t, lineId, wave, payload}]
+    this.timer = null;
+    this.running = false;
+    this.onTick = onTick || function(){};
+    this.onExec = onExec || function(){};
+    this.concurrency = 1;
+    this.inFlight = 0;
+    this.tolerance = 150; // ms
+  }
+  setConcurrency(n){ this.concurrency = Math.max(1, ~~n || 1); }
+
+  load(queue){ // remplace la file
+    this.queue = (queue||[]).slice().sort((a,b)=>a.t-b.t);
+  }
+  push(item){
+    this.queue.push(item);
+    this.queue.sort((a,b)=>a.t-b.t);
+  }
+  clear(){ this.queue.length = 0; }
+
+  start(){
+    if (this.running) return;
+    this.running = true;
+    this._loop();
+  }
+  stop(){
+    this.running = false;
+    if (this.timer) { clearTimeout(this.timer); this.timer = null; }
+  }
+  _loop(){
+    if (!this.running) return;
+    const nowMs = now();
+    // Déclenche tout ce qui est dû, en respectant la concurrence
+    while (this.queue.length && this.inFlight < this.concurrency){
+      const n = this.queue[0];
+      if (n.t <= nowMs + this.tolerance){
+        this.queue.shift();
+        this.inFlight++;
+        this.onExec(n, ()=>{ // done
+          this.inFlight = Math.max(0, this.inFlight-1);
+        }, (err)=>{
+          console.error('[MultiFlood] send error:', err);
+          this.inFlight = Math.max(0, this.inFlight-1);
+        });
+      } else break;
     }
+    this.onTick({now: nowMs, next: this.queue[0]?.t ?? null, left: this.queue.length, inFlight: this.inFlight});
+    const delay = this.queue.length ? Math.max(20, (this.queue[0].t - nowMs) / 2) : 250;
+    this.timer = setTimeout(()=>this._loop(), delay);
   }
+}
 
-  async function computeTravelSecondsAuto(originPseudo, targetPseudo){
-    // Best-effort basé sur tes classes Joueur (si dispos)
-    try{
-      if (typeof Joueur !== 'function') return 0;
-      const ref = new Joueur({pseudo: originPseudo});
-      if (!ref.estJoueurCourant()) await ref.getProfil();
-      const cible = new Joueur({pseudo: targetPseudo});
-      await cible.getProfil();
-      if (typeof ref.getTempsParcours2 === 'function'){
-        return ref.getTempsParcours2(cible);
-      }
-    } catch(e){ console.warn('[MultiFlood] auto travel failed', e); }
-    return 0;
-  }
+// ============ BOÎTE UI ============
 
-  function render(panelSel){
-    const $panel = $(panelSel);
-    $panel.empty();
+class BoiteMultiFlood extends Boite {
 
-    const html = `
-      <div class="o_multiFlood" style="padding:10px;">
-        <h3>Simulateur Multi-Flood (local)</h3>
-        <table class="o_maxWidth" style="max-width:980px;">
-          <tr>
-            <td>Type cible</td>
-            <td>
-              <label><input type="radio" name="mf_target_type" value="pseudo" checked> Pseudo</label>
-              <label style="margin-left:8px;"><input type="radio" name="mf_target_type" value="coords" disabled> Coordonnées</label>
-            </td>
-            <td>Pseudo</td>
-            <td><input id="mf_target" placeholder="Pseudo" style="width:220px"/></td>
-          </tr>
-          <tr>
-            <td>Origine</td>
-            <td colspan="3"><input id="mf_origin" placeholder="Pseudo origine (pour calcul auto du temps)" style="width:320px"/></td>
-          </tr>
-          <tr>
-            <td>Temps de trajet</td>
-            <td>
-                <label><input type="radio" name="mf_travel_mode" value="auto" checked> Auto</label>
-                <label style="margin-left:8px;"><input type="radio" name="mf_travel_mode" value="manual"> Manuel</label>
-            </td>
-            <td>Trajet (s) si manuel</td>
-            <td><input id="mf_travel_seconds" type="number" min="0" value="0" style="width:120px"/></td>
-          </tr>
-          <tr>
-            <td>Vagues</td>
-            <td><input id="mf_nb_waves" type="number" min="1" value="5" style="width:90px"/></td>
-            <td>Intervalle entre vagues (s)</td>
-            <td><input id="mf_interval" type="number" min="0" value="30" style="width:120px"/></td>
-          </tr>
-          <tr>
-            <td>Jitter aléatoire (±s)</td>
-            <td><input id="mf_jitter" type="number" min="0" value="3" style="width:120px"/></td>
-            <td>Départ (optionnel)</td>
-            <td><input id="mf_depart" placeholder="YYYY-MM-DD HH:mm:ss" style="width:220px"/></td>
-          </tr>
-          <tr>
-            <td colspan="4">
-              <strong>Composition par vague</strong> — 14 valeurs séparées par des virgules.<br/>
-              <small>Ordre attendu : jsn, sn, ne, js, s, c, ce, a, ae, se, ta, tk, tae, tke</small>
-            </td>
-          </tr>
-          <tr>
-            <td colspan="4">
-              <textarea id="mf_compo" rows="3" style="width:100%;" placeholder="Ex: 100,0,0,0,0,0,0,0,0,0,0,0,0,0  (ou pourcentages: 50%,30%,20%,...)"></textarea>
-            </td>
-          </tr>
-          <tr>
-            <td>Total si %</td>
-            <td><input id="mf_total_percent" type="number" min="1" value="1000" style="width:120px"/></td>
-            <td colspan="2" style="text-align:right;">
-              <button id="mf_generate" class="o_button">Générer le plan</button>
-              <button id="mf_export_csv" class="o_button" style="margin-left:8px;">Exporter CSV</button>
-            </td>
-          </tr>
+  static _sender = null; // function (job, done, fail)
+  static registerSender(fn){ BoiteMultiFlood._sender = fn; }
+
+  constructor(){
+    super(
+      "o_boiteMultiFlood",
+      "MultiFlood",
+      `<div id="o_mf" class="o_maxWidth" style="padding:8px;">
+        <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:8px;">
+          <button id="o_mf_add" class="o_btn">+ Ligne</button>
+          <button id="o_mf_save" class="o_btn">Sauvegarder</button>
+          <button id="o_mf_load" class="o_btn">Charger</button>
+          <button id="o_mf_clear" class="o_btn">Vider</button>
+          <span style="flex:1 1 auto"></span>
+          <label>Concurrence
+            <input id="o_mf_cc" value="1" size="2" style="width:38px; text-align:center;">
+          </label>
+          <button id="o_mf_plan" class="o_btn">Planifier</button>
+          <button id="o_mf_start" class="o_btn">Lancer</button>
+          <button id="o_mf_stop" class="o_btn" disabled>Stop</button>
+        </div>
+
+        <table id="o_mf_tbl" class="o_table mf_tbl" style="width:100%; border-collapse:collapse;">
+          <thead>
+            <tr class="gras">
+              <td style="width:36px;">On</td>
+              <td style="min-width:120px;">Cible (libellé / id / coords / URL)</td>
+              <td style="min-width:120px;">Unités (ex: "JSN:1000,SN:500")</td>
+              <td style="width:70px;">Vagues</td>
+              <td style="width:90px;">Intervalle (s)</td>
+              <td style="width:90px;">Décalage (s)</td>
+              <td style="width:90px;">Jitter ± (s)</td>
+              <td style="width:60px;">Actions</td>
+            </tr>
+          </thead>
+          <tbody></tbody>
+          <tfoot>
+            <tr class="o_ponte_total" style="background:rgba(0,0,0,0.04); font-weight:600;">
+              <td colspan="2">Total</td>
+              <td colspan="2" style="text-align:right;">Événements : <span id="o_mf_ev">0</span></td>
+              <td colspan="2" style="text-align:right;">Début dans : <span id="o_mf_eta">—</span></td>
+              <td colspan="2" style="text-align:right;">Durée totale : <span id="o_mf_dur">—</span></td>
+            </tr>
+          </tfoot>
         </table>
 
-        <div id="mf_result" style="margin-top:12px;"></div>
-      </div>
-    `;
-    $panel.append(html);
+        <div id="o_mf_log" style="margin-top:10px; max-height:220px; overflow:auto; background:rgba(0,0,0,0.04); padding:6px; border-radius:6px; font-family:monospace; font-size:12px;"></div>
+      </div>`
+    );
 
-    $("#mf_generate").off('click').on('click', async function(){
-      const target = $("#mf_target").val().trim();
-      if (!target){ $.toast && $.toast({...TOAST_ERROR, text:"Cible non renseignée."}); return; }
-
-      const origin = $("#mf_origin").val().trim();
-      const travelMode = $("input[name='mf_travel_mode']:checked").val();
-      let travelSeconds = Number($("#mf_travel_seconds").val()||0);
-      const nbWaves = Math.max(1, parseInt($("#mf_nb_waves").val()||1,10));
-      const interval = Math.max(0, parseInt($("#mf_interval").val()||0,10));
-      const jitter   = Math.max(0, parseInt($("#mf_jitter").val()||0,10));
-      const departTxt= $("#mf_depart").val().trim();
-      const depart   = departTxt ? moment(departTxt, "YYYY-MM-DD HH:mm:ss") : moment();
-      if (!depart.isValid()){ $.toast && $.toast({...TOAST_ERROR, text:"Date de départ invalide."}); return; }
-
-      const compoSpec = parseCompo($("#mf_compo").val());
-      if (!compoSpec){ $.toast && $.toast({...TOAST_ERROR, text:"Composition invalide."}); return; }
-      const totalIfPercent = Math.max(1, parseInt($("#mf_total_percent").val()||1000,10));
-
-      if (travelMode === 'auto'){
-        if (!origin){ $.toast && $.toast({...TOAST_WARNING, text:"Origine vide : bascule sur 0s (renseigne le pseudo origine pour auto)."}); }
-        else {
-          const t = await computeTravelSecondsAuto(origin, target);
-          if (t>0) travelSeconds = t;
-          else $.toast && $.toast({...TOAST_WARNING, text:"Impossible de calculer automatiquement (0s retenu)."});
-        }
-      }
-
-      const rows = [];
-      let offsetCum = 0;
-      for (let w=0; w<nbWaves; w++){
-        const rand = jitter ? (Math.floor(Math.random()*(2*jitter+1)) - jitter) : 0;
-        const offset = offsetCum + rand;
-        const d = moment(depart).add(offset, 's');
-        const a = moment(d).add(travelSeconds, 's');
-
-        let units = new Array(14).fill(0);
-        if (compoSpec.type === 'absolute'){
-          units = compoSpec.value.slice();
-        } else {
-          for(let i=0;i<14;i++) units[i] = Math.round((compoSpec.value[i] || 0) * totalIfPercent);
-        }
-
-        rows.push({
-          wave: w+1,
-          depart: d.format("YYYY-MM-DD HH:mm:ss"),
-          arrival: a.format("YYYY-MM-DD HH:mm:ss"),
-          units: units
-        });
-        offsetCum += interval;
-      }
-
-      let table = `<div><table class="o_maxWidth" style="max-width:100%"><thead>
-                     <tr><th>#</th><th>Départ</th><th>Arrivée</th><th>Composition</th><th>Actions</th></tr>
-                   </thead><tbody>`;
-      for (const r of rows){
-        const compoStr = r.units.join(',');
-        table += `<tr>
-          <td>${r.wave}</td>
-          <td>${r.depart}</td>
-          <td>${r.arrival}</td>
-          <td style="font-family:monospace">${compoStr}</td>
-          <td>
-            <button class="mf_copy o_button" data-comp="${compoStr}">Copier</button>
-            <button class="mf_export_row o_button" data-row='${JSON.stringify(r).replace(/'/g,"&#39;")}'>Exporter</button>
-          </td>
-        </tr>`;
-      }
-      table += `</tbody></table></div>`;
-      $("#mf_result").html(table);
-
-      $(".mf_copy").off('click').on('click', function(){
-        const text = $(this).data('comp');
-        (navigator.clipboard && navigator.clipboard.writeText(text)
-          .then(()=> $.toast && $.toast({...TOAST_SUCCESS, text:"Composition copiée."}))
-          .catch(()=> $.toast && $.toast({...TOAST_WARNING, text:"Copie automatique impossible; copie manuelle."}))
-        );
-      });
-
-      $(".mf_export_row").off('click').on('click', function(){
-        const row = JSON.parse($(this).attr('data-row').replace(/&#39;/g,"'"));
-        const csv = `vague,depart,arrivee,composition\n${row.wave},"${row.depart}","${row.arrival}","${row.units.join(',')}"\n`;
-        const blob = new Blob([csv], {type:'text/csv'});
-        const url  = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url; a.download = `mf_wave_${row.wave}.csv`; document.body.appendChild(a); a.click(); a.remove();
-        URL.revokeObjectURL(url);
-      });
-    });
-
-    $("#mf_export_csv").off('click').on('click', function(){
-      const $t = $("#mf_result table");
-      if (!$t.length){ $.toast && $.toast({...TOAST_WARNING, text:"Aucun plan à exporter."}); return; }
-      let csv = "vague,depart,arrivee,composition\n";
-      $t.find("tbody tr").each((i,tr)=>{
-        const wave   = $(tr).find('td:eq(0)').text().trim();
-        const depart = $(tr).find('td:eq(1)').text().trim();
-        const arr    = $(tr).find('td:eq(2)').text().trim();
-        const comp   = $(tr).find('td:eq(3)').text().trim();
-        csv += `${wave},"${depart}","${arr}","${comp}"\n`;
-      });
-      const blob = new Blob([csv], {type:'text/csv'});
-      const url  = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url; a.download = `mf_plan_${moment().format("YYYYMMDD_HHmmss")}.csv`; document.body.appendChild(a); a.click(); a.remove();
-      URL.revokeObjectURL(url);
+    this.scheduler = new Scheduler({
+      onTick: (st)=> this._onTick(st),
+      onExec: (job, done, fail)=> this._exec(job, done, fail)
     });
   }
 
-  window.MultiFlood = {
-    /**
-     * @param {string} panelSelector - ex: '#o_tabsCombat3'
-     * @returns {void}
-     */
-    boot(panelSelector){
-      try{
-        render(panelSelector || '#o_tabsCombat3');
-      }catch(err){
-        console.error('[MultiFlood] boot error:', err);
-        if (window.$) {
-          $(panelSelector||'#o_tabsCombat3').html(
-            `<div style="padding:10px;color:#c00;">Erreur de rendu Multi-Flood: ${String(err)}</div>`
-          );
-        }
+  afficher(){
+    if (super.afficher()){
+      this.css().event();
+      // Charger config si dispo
+      const cfg = this._loadCfg();
+      if (cfg?.rows?.length) {
+        cfg.rows.forEach(r => this._addRow(r));
+        $("#o_mf_cc").val(cfg.concurrency || 1);
+      } else {
+        // Ligne d'exemple
+        this._addRow({on: true, target: 'Cible #1', units: 'JSN:1000', waves: 5, interval: 6, offset: 0, jitter: 0});
       }
     }
-  };
+    return this;
+  }
+
+  css(){
+    super.css();
+    const $box = $("#o_mf");
+    $box.find(".o_btn").css({ padding:'6px 10px', borderRadius:'6px', cursor:'pointer' });
+    $box.find("input").css({ padding:'2px 4px', borderRadius:'4px' });
+    $("#o_mf_tbl td").css({ borderBottom:'1px solid rgba(0,0,0,0.08)', padding:'4px' });
+    return this;
+  }
+
+  event(){
+    super.event();
+    const $ = window.jQuery;
+
+    // Spinners
+    const spinInt = {min:0, numberFormat:'i'};
+    $("#o_mf_cc").spinner(spinInt);
+
+    // Boutons barre
+    $("#o_mf_add").on('click', ()=> this._addRow());
+    $("#o_mf_save").on('click', ()=> this._saveCfg());
+    $("#o_mf_load").on('click', ()=> this._reloadCfg());
+    $("#o_mf_clear").on('click', ()=> this._clearRows());
+    $("#o_mf_plan").on('click', ()=> this._planifier());
+    $("#o_mf_start").on('click', ()=> this._start());
+    $("#o_mf_stop").on('click',  ()=> this._stop());
+
+    // Raccourcis
+    this._log('Prêt. Ajoute des lignes et clique Planifier → Lancer.');
+    return this;
+  }
+
+  // ---------- Gestion des lignes ----------
+  _addRow(data){
+    const $tb = $("#o_mf_tbl tbody");
+    const id = Math.random().toString(36).slice(2,9);
+    const row = Object.assign({
+      on: true, target:'', units:'', waves:1, interval:1, offset:0, jitter:0
+    }, data||{});
+
+    const $tr = $(`
+      <tr data-id="${id}">
+        <td style="text-align:center;"><input type="checkbox" class="mf_on"></td>
+        <td><input class="mf_target"  placeholder="Ex: 12345 / 1:2:3 / http://…"></td>
+        <td><input class="mf_units"   placeholder='Ex: "JSN:1000,SN:500"'></td>
+        <td><input class="mf_waves"   style="width:60px;"></td>
+        <td><input class="mf_interval"style="width:80px;"></td>
+        <td><input class="mf_offset"  style="width:80px;"></td>
+        <td><input class="mf_jitter"  style="width:80px;"></td>
+        <td style="text-align:center;">
+          <button class="o_btn mf_dup" title="Dupliquer">⧉</button>
+          <button class="o_btn mf_del" title="Supprimer">✖</button>
+        </td>
+      </tr>
+    `);
+
+    $tb.append($tr);
+    $tr.find('.mf_on').prop('checked', !!row.on);
+    $tr.find('.mf_target').val(row.target);
+    $tr.find('.mf_units').val(row.units);
+    $tr.find('.mf_waves').val(row.waves).spinner({min:1, numberFormat:'i'});
+    $tr.find('.mf_interval').val(row.interval).spinner({min:0, numberFormat:'i'});
+    $tr.find('.mf_offset').val(row.offset).spinner({min:0, numberFormat:'i'});
+    $tr.find('.mf_jitter').val(row.jitter).spinner({min:0, numberFormat:'i'});
+
+    // actions
+    $tr.find('.mf_dup').on('click', ()=>{
+      this._addRow(this._readRow($tr));
+    });
+    $tr.find('.mf_del').on('click', ()=>{
+      $tr.remove();
+      this._planifier(false);
+    });
+  }
+
+  _readRow($tr){
+    return {
+      on:       $tr.find('.mf_on').prop('checked'),
+      target:   $tr.find('.mf_target').val().trim(),
+      units:    $tr.find('.mf_units').val().trim(),
+      waves:    ~~$tr.find('.mf_waves').spinner('value'),
+      interval: ~~$tr.find('.mf_interval').spinner('value'),
+      offset:   ~~$tr.find('.mf_offset').spinner('value'),
+      jitter:   ~~$tr.find('.mf_jitter').spinner('value'),
+      id:       $tr.data('id')
+    };
+  }
+
+  _readAllRows(){
+    const rows = [];
+    $("#o_mf_tbl tbody tr").each((_, tr)=>{
+      rows.push(this._readRow($(tr)));
+    });
+    return rows;
+  }
+
+  _clearRows(){
+    $("#o_mf_tbl tbody").empty();
+    this._planifier(false);
+  }
+
+  // ---------- Config ----------
+  _saveCfg(){
+    const cfg = {
+      concurrency: ~~$("#o_mf_cc").spinner('value') || 1,
+      rows: this._readAllRows()
+    };
+    try {
+      localStorage.setItem(LS_KEY_CFG, JSON.stringify(cfg));
+      $.toast?.({...TOAST_SUCCESS, text:"MultiFlood sauvegardé."});
+    } catch(e) {
+      console.error(e);
+      $.toast?.({...TOAST_ERROR, text:"Échec sauvegarde (quota ?)"});
+    }
+  }
+  _loadCfg(){
+    try {
+      const raw = localStorage.getItem(LS_KEY_CFG);
+      return raw ? JSON.parse(raw) : null;
+    } catch(e) { return null; }
+  }
+  _reloadCfg(){
+    $("#o_mf_tbl tbody").empty();
+    const cfg = this._loadCfg();
+    if (cfg?.rows?.length){
+      cfg.rows.forEach(r => this._addRow(r));
+      $("#o_mf_cc").val(cfg.concurrency || 1);
+      this._planifier(false);
+      $.toast?.({...TOAST_INFO, text:"MultiFlood chargé."});
+    } else {
+      $.toast?.({...TOAST_INFO, text:"Aucune configuration sauvegardée."});
+    }
+  }
+
+  // ---------- Planification ----------
+  _planifier(toast=true){
+    const rows = this._readAllRows().filter(r => r.on && r.waves>0);
+    const baseT = now();
+    const queue = [];
+    let firstT = null, lastT = null;
+
+    for (const r of rows){
+      for (let k=0; k<r.waves; k++){
+        const jitter = r.jitter ? (Math.floor((Math.random()*2-1)*r.jitter)*1000) : 0;
+        const t = baseT + (r.offset*1000) + (k*r.interval*1000) + jitter;
+        const job = {
+          t,
+          lineId: r.id,
+          wave: k+1,
+          totalWaves: r.waves,
+          target: r.target,
+          units: r.units,
+        };
+        queue.push(job);
+        if (firstT===null || t<firstT) firstT=t;
+        if (lastT===null  || t>lastT)  lastT=t;
+      }
+    }
+    queue.sort((a,b)=>a.t-b.t);
+    this.scheduler.setConcurrency(~~$("#o_mf_cc").spinner('value') || 1);
+    this.scheduler.load(queue);
+
+    $("#o_mf_ev").text(queue.length);
+    $("#o_mf_eta").text(queue.length ? formatClock(firstT - baseT) : '—');
+    $("#o_mf_dur").text(queue.length ? formatClock(lastT - firstT) : '—');
+
+    if (toast) $.toast?.({...TOAST_INFO, text:`Planifié ${queue.length} envois.`});
+    this._persistState();
+  }
+
+  // ---------- Exécution ----------
+  _start(){
+    if (!this.scheduler.queue.length) this._planifier(false);
+    if (!this.scheduler.queue.length){
+      $.toast?.({...TOAST_INFO, text:"Rien à lancer (plan vide)."});
+      return;
+    }
+    $("#o_mf_start").prop('disabled', true);
+    $("#o_mf_stop").prop('disabled', false);
+    this._log('Démarrage…');
+    this.scheduler.start();
+    this._persistState();
+  }
+
+  _stop(){
+    this.scheduler.stop();
+    $("#o_mf_start").prop('disabled', false);
+    $("#o_mf_stop").prop('disabled', true);
+    this._log('Arrêt demandé.');
+    this._persistState();
+  }
+
+  _onTick(st){
+    // affichage léger du prochain départ
+    if (st.next){
+      const eta = Math.max(0, st.next - now());
+      $("#o_mf_eta").text(formatClock(eta));
+    } else {
+      $("#o_mf_eta").text('—');
+      $("#o_mf_start").prop('disabled', false);
+      $("#o_mf_stop").prop('disabled', true);
+    }
+  }
+
+  _exec(job, done, fail){
+    const tag = `[${new Date(job.t).toLocaleTimeString()}]`;
+    const txt = `${tag} Wave ${job.wave}/${job.totalWaves} → ${job.target} | ${job.units || '(aucune unité définie)'}`;
+    if (typeof BoiteMultiFlood._sender === 'function'){
+      try {
+        BoiteMultiFlood._sender(job, ()=>{
+          this._log('OK  ' + txt);
+          done();
+        }, (err)=>{
+          this._log('ERR ' + txt + ' — ' + (err?.message || err));
+          fail(err);
+        });
+      } catch(e){
+        this._log('ERR ' + txt + ' — ' + e.message);
+        fail(e);
+      }
+    } else {
+      // Fallback : simulation (pas d’envoi réel)
+      this._log('SIM ' + txt);
+      setTimeout(done, 50);
+    }
+  }
+
+  // ---------- Logs & State ----------
+  _log(s){
+    const $log = $("#o_mf_log");
+    const line = document.createElement('div');
+    line.textContent = s;
+    $log.append(line);
+    $log.scrollTop($log[0].scrollHeight);
+  }
+
+  _persistState(){
+    const st = {
+      running: this.scheduler.running,
+      queueLen: this.scheduler.queue.length,
+      cc: ~~$("#o_mf_cc").spinner('value') || 1
+    };
+    try{ localStorage.setItem(LS_KEY_STATE, JSON.stringify(st)); }catch(e){}
+  }
+}
+
+// Expose la boîte
+window.BoiteMultiFlood = BoiteMultiFlood;
+
+// ============ EXEMPLE D’INTÉGRATION ENVOI RÉEL ============
+//
+// Branche l’envoi réel ici. Tu peux le faire dans un autre fichier si tu préfères.
+// Le `job` contient : { t, lineId, wave, totalWaves, target, units }
+// - `target` : ton id/coords/URL, à parser selon ton format
+// - `units`  : texte "JSN:1000,SN:500" → à parser en {JSN:1000, SN:500, …}
+//
+// Exemple squelette : POST vers Armee.php (à adapter à tes champs exacts)
+//
+// BoiteMultiFlood.registerSender(async (job, done, fail) => {
+//   try {
+//     // 1) Parse
+//     const units = {};
+//     if (job.units) job.units.split(',').forEach(kv=>{
+//       const [k,v] = kv.split(':'); units[k.trim()] = parseInt(v,10)||0;
+//     });
+//     // 2) Récup token si nécessaire
+//     const base = "http://" + Utils.serveur + ".fourmizzz.fr";
+//     const token = await $.get(base + "/Armee.php").then(html=>{
+//       const $p = $('<div/>').append(html);
+//       const $t = $p.find("#t");
+//       return $t.attr('name') + '=' + $t.attr('value'); // ex: "t=abc123"
+//     });
+//     // 3) Construire payload (ADAPTER aux champs de ton formulaire d’attaque)
+//     const send = {
+//       // … tes champs cibles … ex. idVillage: job.target
+//       "action": "attaque",
+//       // unités : transforme selon les noms d’inputs attendus côté Fzzz (ex: uniteJSN, uniteSN…)
+//       // Exemple:
+//       // "uniteJSN": units.JSN || 0,
+//       // "uniteSN":  units.SN  || 0,
+//     };
+//     const [tkName, tkValue] = token.split('=');
+//     send[tkName] = tkValue;
+//     // 4) POST
+//     await $.post(base + "/Armee.php", send);
+//     done();
+//   } catch(e){
+//     fail(e);
+//   }
+// });
+
 })();
